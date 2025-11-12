@@ -5,17 +5,25 @@ import { decide } from "@/lib/decide";
 
 export const runtime = "nodejs";
 
-// simple ranking so we can pick the "better" verdict across modes
+// score to pick the stronger verdict
 const SCORE: Record<string, number> = {
   OK: 3,
   MISMATCH: 2,
   NOT_FOUND: 1,
-  ERROR: 0
+  ERROR: 0,
+};
+
+type Row = {
+  orderNumber?: string;
+  partyName?: string;
+  trackingNumber?: string;
+  assertedDate?: Date | null;
+  sourceMode?: "PO" | "SO"; // where the row came from
 };
 
 async function reconcileOne(
   mode: "PO" | "SO",
-  r: { orderNumber?: string; trackingNumber?: string; assertedDate?: Date | null; partyName?: string }
+  r: Row
 ) {
   let orderExists = false;
   let packages: { tracking: string; date?: string | null }[] = [];
@@ -24,8 +32,13 @@ async function reconcileOne(
   if (r.orderNumber) {
     const order = await getOrder(mode, r.orderNumber).catch(() => null);
     orderExists = !!order;
-    partyOT = (order?.partyName ?? (order as any)?.vendorName ?? (order as any)?.customerName) as string | undefined;
-    const activity = orderExists ? await getActivity(mode, r.orderNumber).catch(() => null) : null;
+    partyOT =
+      (order?.partyName as string | undefined) ??
+      (order as any)?.vendorName ??
+      (order as any)?.customerName;
+    const activity = orderExists
+      ? await getActivity(mode, r.orderNumber).catch(() => null)
+      : null;
     packages = activity ? extractPackages(activity) : [];
   } else if (r.trackingNumber) {
     const tracking = r.trackingNumber.toUpperCase().replace(/\s|-/g, "");
@@ -55,44 +68,55 @@ async function reconcileOne(
 export async function POST(req: NextRequest) {
   try {
     const form = await req.formData();
-    const file = form.get("file") as File | null;
-    if (!file) return new Response("Missing file (form field 'file')", { status: 400 });
 
-    let rows;
-    try {
-      rows = await parseFile(file);
-      // DEBUG: show a tiny preview + counts (without leaking file contents)
-const preview = rows.slice(0, 3).map((r: any) => ({
-  orderNumber: r.orderNumber ?? "",
-  trackingNumber: r.trackingNumber ?? "",
-  assertedDate: r.assertedDate?.toISOString?.()?.slice(0,10) ?? "",
-  partyName: r.partyName ?? ""
-}));
-const numWithOrder = rows.filter((r: any) => r.orderNumber).length;
-const numWithTracking = rows.filter((r: any) => r.trackingNumber).length;
-console.log(`[RECON DEBUG] rows=${rows.length} withOrder=${numWithOrder} withTracking=${numWithTracking} preview=`, preview);
+    // Accept two files: poFile and soFile (either or both)
+    const poFile = form.get("poFile") as File | null;
+    const soFile = form.get("soFile") as File | null;
 
-    } catch (e: any) {
-      console.error("[parseFile] error:", e?.message || e);
-      return new Response(`Parse error: ${e?.message || e}`, { status: 400 });
+    if (!poFile && !soFile) {
+      return new Response("Upload at least one file: 'poFile' and/or 'soFile'", { status: 400 });
     }
 
+    // Parse both if present, tag their rows
+    const rows: Row[] = [];
+
+    const parseAndTag = async (f: File, tag: "PO" | "SO") => {
+      const parsed = await parseFile(f);
+      for (const r of parsed) rows.push({ ...r, sourceMode: tag });
+    };
+
+    if (poFile) await parseAndTag(poFile, "PO");
+    if (soFile) await parseAndTag(soFile, "SO");
+
+    if (!rows.length) return new Response("No data rows found in uploads.", { status: 400 });
+
+    // Reconcile each row
     const details: any[] = [];
     const counts: Record<string, number> = {};
 
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
-      try {
-        const resPO = await reconcileOne("PO", r);
-        const resSO = await reconcileOne("SO", r);
+      const prefer: "PO" | "SO" = r.sourceMode ?? "PO";
+      const other: "PO" | "SO" = prefer === "PO" ? "SO" : "PO";
 
-        // choose better verdict; tie-breaker prefers OK> MISMATCH > NOT_FOUND > ERROR, else PO first
-        const pick = (SCORE[resSO.verdict] ?? 0) > (SCORE[resPO.verdict] ?? 0) ? resSO : resPO;
+      try {
+        // try the preferred mode first
+        const resPref = await reconcileOne(prefer, r);
+
+        // cross-check the other mode too (keeps behavior consistent with single-file)
+        const resOther = await reconcileOne(other, r);
+
+        // choose the stronger verdict
+        const pick =
+          (SCORE[resOther.verdict] ?? 0) > (SCORE[resPref.verdict] ?? 0)
+            ? resOther
+            : resPref;
 
         counts[pick.verdict] = (counts[pick.verdict] ?? 0) + 1;
 
         details.push({
           row: i + 1,
+          sourceMode: r.sourceMode ?? "",
           chosenMode: pick.mode,
           orderNumber: r.orderNumber ?? "",
           partyUpload: r.partyName ?? "",
@@ -101,15 +125,14 @@ console.log(`[RECON DEBUG] rows=${rows.length} withOrder=${numWithOrder} withTra
           verdict: pick.verdict,
           reason: pick.reason,
           dayDelta: pick.dayDelta,
-          // optional: include both mode verdicts for transparency
-          poVerdict: resPO.verdict,
-          soVerdict: resSO.verdict,
+          poVerdict: resPref.mode === "PO" ? resPref.verdict : resOther.verdict,
+          soVerdict: resPref.mode === "SO" ? resPref.verdict : resOther.verdict,
         });
       } catch (err: any) {
-        console.error(`[row ${i + 1}] error:`, err?.message || err);
         counts["ERROR"] = (counts["ERROR"] ?? 0) + 1;
         details.push({
           row: i + 1,
+          sourceMode: r.sourceMode ?? "",
           chosenMode: "",
           orderNumber: r.orderNumber ?? "",
           partyUpload: r.partyName ?? "",
