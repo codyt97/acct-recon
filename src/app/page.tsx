@@ -3,15 +3,15 @@ import { useState } from "react";
 
 export default function Home() {
   const [poFile, setPoFile] = useState<File | null>(null);
-  const [soFile, setSoFile] = useState<File | null>(null);
+  const [shipFile, setShipFile] = useState<File | null>(null); // ShipDocs
   const [upsFile, setUpsFile] = useState<File | null>(null);
   const [result, setResult] = useState<any | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function submit() {
-    if (!poFile && !soFile && !upsFile) {
-      setErr("Please upload at least one file (PO and/or SO and/or UPS).");
+    if (!poFile && !shipFile && !upsFile) {
+      setErr("Please upload at least one file (PO and/or ShipDocs and/or UPS).");
       return;
     }
     setBusy(true);
@@ -20,7 +20,7 @@ export default function Home() {
 
     const fd = new FormData();
     if (poFile) fd.append("poFile", poFile);
-    if (soFile) fd.append("soFile", soFile);
+    if (shipFile) fd.append("shipFile", shipFile); // renamed
     if (upsFile) fd.append("upsFile", upsFile);
 
     const r = await fetch("/api/reconcile", { method: "POST", body: fd });
@@ -44,12 +44,14 @@ export default function Home() {
         fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
       }}
     >
-      <h1 style={{ fontSize: 24, fontWeight: 700 }}>Accounting Reconciliation (PO + SO + UPS)</h1>
+      <h1 style={{ fontSize: 24, fontWeight: 700 }}>
+        Accounting Reconciliation (PO + ShipDocs + UPS)
+      </h1>
       <p style={{ marginTop: 6 }}>
-        Upload a CSV/XLSX for <b>PO</b>, <b>SO</b>, and/or <b>UPS</b>. We parse headers like{" "}
-        <code>poNumber/soNumber/invoiceNumber</code>, <code>tracking</code>,{" "}
+        Upload a CSV/XLSX for <b>PO</b>, <b>ShipDocs</b>, and/or <b>UPS</b>. We parse headers like{" "}
+        <code>poNumber/shipDoc/invoiceNumber</code>, <code>tracking</code>,{" "}
         <code>transaction date</code>, and <code>vendor/customer</code>. Rows are checked against
-        OrderTime; UPS rows usually carry only tracking/date and will be matched to PO/SO.
+        OrderTime; UPS rows usually carry only tracking/date and will be matched to PO/ShipDocs.
       </p>
 
       <div
@@ -60,21 +62,21 @@ export default function Home() {
           marginTop: 14,
         }}
       >
-        <Uploader label="PO file" onChange={(f) => setPoFile(f)} file={poFile} />
-        <Uploader label="SO file" onChange={(f) => setSoFile(f)} file={soFile} />
-        <Uploader label="UPS file" onChange={(f) => setUpsFile(f)} file={upsFile} />
+        <Uploader label="PO file" onChange={setPoFile} file={poFile} />
+        <Uploader label="ShipDocs file" onChange={setShipFile} file={shipFile} />
+        <Uploader label="UPS file" onChange={setUpsFile} file={upsFile} />
       </div>
 
       <button
         onClick={submit}
-        disabled={busy || (!poFile && !soFile && !upsFile)}
+        disabled={busy || (!poFile && !shipFile && !upsFile)}
         style={{
           marginTop: 16,
           padding: "10px 16px",
           borderRadius: 8,
           border: "1px solid #ddd",
           background: busy ? "#e3e3e3" : "#fff",
-          cursor: busy || (!poFile && !soFile && !upsFile) ? "not-allowed" : "pointer",
+          cursor: busy || (!poFile && !shipFile && !upsFile) ? "not-allowed" : "pointer",
         }}
       >
         {busy ? "Reconciling..." : "Reconcile"}
@@ -112,8 +114,8 @@ export default function Home() {
                 <tr>
                   {[
                     "Row",
-                    "Source",      // PO-file / SO-file / UPS-file
-                    "Chosen",      // mode chosen after scoring
+                    "Source", // PO-file / ShipDocs-file / UPS-file
+                    "Chosen",
                     "Order",
                     "Party",
                     "Tracking",
@@ -122,7 +124,7 @@ export default function Home() {
                     "Reason",
                     "Δdays",
                     "PO",
-                    "SO",
+                    "ShipDoc",
                   ].map((h) => (
                     <th
                       key={h}
@@ -158,7 +160,7 @@ export default function Home() {
                     </td>
                     <td style={{ ...cell, textAlign: "right", width: 60 }}>{r.dayDelta ?? ""}</td>
                     <td style={cell}>{r.poVerdict ?? ""}</td>
-                    <td style={cell}>{r.soVerdict ?? ""}</td>
+                    <td style={cell}>{r.shipVerdict ?? ""}</td>
                   </tr>
                 ))}
               </tbody>
