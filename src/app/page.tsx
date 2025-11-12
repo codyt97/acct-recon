@@ -5,16 +5,24 @@ export default function Home() {
   const [mode, setMode] = useState<"PO" | "SO">("PO");
   const [file, setFile] = useState<File | null>(null);
   const [result, setResult] = useState<any | null>(null);
+  const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function submit() {
     if (!file) return;
     setBusy(true);
+    setErr(null);
     setResult(null);
     const fd = new FormData();
     fd.append("mode", mode);
     fd.append("file", file);
     const r = await fetch("/api/reconcile", { method: "POST", body: fd });
+    if (!r.ok) {
+      const text = await r.text();
+      setErr(`${r.status} ${r.statusText}: ${text}`);
+      setBusy(false);
+      return;
+    }
     const j = await r.json();
     setResult(j);
     setBusy(false);
@@ -23,7 +31,7 @@ export default function Home() {
   return (
     <div style={{ maxWidth: 900, margin: "40px auto", padding: 20, fontFamily: "system-ui" }}>
       <h1 style={{ fontSize: 22, fontWeight: 700 }}>Accounting Reconciliation (Minimal)</h1>
-      <p>Upload CSV/XLSX with headers: <code>orderNumber, partyName, trackingNumber, assertedDate</code></p>
+      <p>CSV/XLSX headers can be flexible. We’ll detect things like <code>poNumber/invoiceNumber</code>, <code>vendor/customer</code>, <code>tracking</code>, and <code>shipDate/invoiceDate</code>.</p>
 
       <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 12 }}>
         <label>Mode:</label>
@@ -40,6 +48,10 @@ export default function Home() {
       <button onClick={submit} disabled={!file || busy} style={{ marginTop: 12, padding: "8px 14px" }}>
         {busy ? "Reconciling..." : "Reconcile"}
       </button>
+
+      {err && (
+        <pre style={{ marginTop: 16, color: "#b00020", whiteSpace: "pre-wrap" }}>{err}</pre>
+      )}
 
       {result && (
         <div style={{ marginTop: 24 }}>
