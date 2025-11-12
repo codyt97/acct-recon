@@ -61,6 +61,17 @@ export async function POST(req: NextRequest) {
     let rows;
     try {
       rows = await parseFile(file);
+      // DEBUG: show a tiny preview + counts (without leaking file contents)
+const preview = rows.slice(0, 3).map((r: any) => ({
+  orderNumber: r.orderNumber ?? "",
+  trackingNumber: r.trackingNumber ?? "",
+  assertedDate: r.assertedDate?.toISOString?.()?.slice(0,10) ?? "",
+  partyName: r.partyName ?? ""
+}));
+const numWithOrder = rows.filter((r: any) => r.orderNumber).length;
+const numWithTracking = rows.filter((r: any) => r.trackingNumber).length;
+console.log(`[RECON DEBUG] rows=${rows.length} withOrder=${numWithOrder} withTracking=${numWithTracking} preview=`, preview);
+
     } catch (e: any) {
       console.error("[parseFile] error:", e?.message || e);
       return new Response(`Parse error: ${e?.message || e}`, { status: 400 });
