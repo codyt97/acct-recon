@@ -2,18 +2,27 @@
 import { useState } from "react";
 
 export default function Home() {
-  const [file, setFile] = useState<File | null>(null);
+  const [poFile, setPoFile] = useState<File | null>(null);
+  const [soFile, setSoFile] = useState<File | null>(null);
+  const [upsFile, setUpsFile] = useState<File | null>(null);
   const [result, setResult] = useState<any | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function submit() {
-    if (!file) return;
+    if (!poFile && !soFile && !upsFile) {
+      setErr("Please upload at least one file (PO and/or SO and/or UPS).");
+      return;
+    }
     setBusy(true);
     setErr(null);
     setResult(null);
+
     const fd = new FormData();
-    fd.append("file", file);
+    if (poFile) fd.append("poFile", poFile);
+    if (soFile) fd.append("soFile", soFile);
+    if (upsFile) fd.append("upsFile", upsFile);
+
     const r = await fetch("/api/reconcile", { method: "POST", body: fd });
     if (!r.ok) {
       const text = await r.text();
@@ -29,50 +38,49 @@ export default function Home() {
   return (
     <div
       style={{
-        // Give the page a much wider canvas so every column can fit
         width: "min(1600px, 96vw)",
         margin: "40px auto",
         padding: 20,
         fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
       }}
     >
-      <h1 style={{ fontSize: 24, fontWeight: 700 }}>Accounting Reconciliation (PO/SO Auto)</h1>
+      <h1 style={{ fontSize: 24, fontWeight: 700 }}>Accounting Reconciliation (PO + SO + UPS)</h1>
       <p style={{ marginTop: 6 }}>
-        Upload a CSV/XLSX with headers like <code>tracking</code>, <code>transaction date</code>,{" "}
-        <code>vendor/customer</code>, or <code>poNumber/invoiceNumber/soNumber</code>. We’ll check
-        <b> both</b> PO and SO automatically.
+        Upload a CSV/XLSX for <b>PO</b>, <b>SO</b>, and/or <b>UPS</b>. We parse headers like{" "}
+        <code>poNumber/soNumber/invoiceNumber</code>, <code>tracking</code>,{" "}
+        <code>transaction date</code>, and <code>vendor/customer</code>. Rows are checked against
+        OrderTime; UPS rows usually carry only tracking/date and will be matched to PO/SO.
       </p>
 
       <div
         style={{
-          marginTop: 12,
-          padding: 20,
-          border: "1px dashed #bbb",
-          borderRadius: 12,
-          background: "#fafafa",
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr 1fr",
+          gap: 16,
+          marginTop: 14,
         }}
       >
-        <input type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+        <Uploader label="PO file" onChange={(f) => setPoFile(f)} file={poFile} />
+        <Uploader label="SO file" onChange={(f) => setSoFile(f)} file={soFile} />
+        <Uploader label="UPS file" onChange={(f) => setUpsFile(f)} file={upsFile} />
       </div>
 
       <button
         onClick={submit}
-        disabled={!file || busy}
+        disabled={busy || (!poFile && !soFile && !upsFile)}
         style={{
-          marginTop: 12,
+          marginTop: 16,
           padding: "10px 16px",
           borderRadius: 8,
           border: "1px solid #ddd",
           background: busy ? "#e3e3e3" : "#fff",
-          cursor: !file || busy ? "not-allowed" : "pointer",
+          cursor: busy || (!poFile && !soFile && !upsFile) ? "not-allowed" : "pointer",
         }}
       >
         {busy ? "Reconciling..." : "Reconcile"}
       </button>
 
-      {err && (
-        <pre style={{ marginTop: 16, color: "#b00020", whiteSpace: "pre-wrap" }}>{err}</pre>
-      )}
+      {err && <pre style={{ marginTop: 16, color: "#b00020", whiteSpace: "pre-wrap" }}>{err}</pre>}
 
       {result && (
         <div style={{ marginTop: 24 }}>
@@ -91,12 +99,10 @@ export default function Home() {
 
           <h2 style={{ fontSize: 18, fontWeight: 600, marginTop: 16 }}>Details</h2>
 
-          {/* Wider table container; allow overflow if viewport is smaller */}
           <div style={{ width: "100%", overflowX: "auto" }}>
             <table
               style={{
-                // Make the table itself wide enough to show all columns comfortably
-                minWidth: 1400, // bump this up if you add more columns
+                minWidth: 1700,
                 borderCollapse: "collapse",
                 fontSize: 14,
                 tableLayout: "auto",
@@ -105,6 +111,9 @@ export default function Home() {
               <thead>
                 <tr>
                   {[
+                    "Row",
+                    "Source",      // PO-file / SO-file / UPS-file
+                    "Chosen",      // mode chosen after scoring
                     "Order",
                     "Party",
                     "Tracking",
@@ -135,13 +144,16 @@ export default function Home() {
               </thead>
               <tbody>
                 {result.details.map((r: any) => (
-                  <tr key={r.row}>
+                  <tr key={`${r.row}-${r.sourceMode}-${r.orderNumber}-${r.trackingUpload}`}>
+                    <td style={cell}>{r.row}</td>
+                    <td style={cell}>{r.sourceMode}</td>
+                    <td style={cell}>{r.chosenMode}</td>
                     <td style={cell}>{r.orderNumber}</td>
                     <td style={cell}>{r.partyUpload}</td>
                     <td style={cellMono}>{r.trackingUpload}</td>
                     <td style={cell}>{r.assertedDate}</td>
                     <td style={{ ...cell, fontWeight: 600 }}>{r.verdict}</td>
-                    <td style={{ ...cell, maxWidth: 420, whiteSpace: "normal", wordBreak: "break-word" }}>
+                    <td style={{ ...cell, maxWidth: 520, whiteSpace: "normal", wordBreak: "break-word" }}>
                       {r.reason}
                     </td>
                     <td style={{ ...cell, textAlign: "right", width: 60 }}>{r.dayDelta ?? ""}</td>
@@ -158,6 +170,31 @@ export default function Home() {
   );
 }
 
+function Uploader({
+  label,
+  onChange,
+  file,
+}: {
+  label: string;
+  onChange: (f: File | null) => void;
+  file: File | null;
+}) {
+  return (
+    <div
+      style={{
+        padding: 16,
+        border: "1px dashed #bbb",
+        borderRadius: 12,
+        background: "#fafafa",
+      }}
+    >
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>{label}</div>
+      <input type="file" onChange={(e) => onChange(e.target.files?.[0] ?? null)} />
+      {file && <div style={{ fontSize: 12, color: "#555", marginTop: 6 }}>{file.name}</div>}
+    </div>
+  );
+}
+
 const cell: React.CSSProperties = {
   padding: "10px 12px",
   borderBottom: "1px solid #eee",
@@ -166,5 +203,6 @@ const cell: React.CSSProperties = {
 
 const cellMono: React.CSSProperties = {
   ...cell,
-  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
+  fontFamily:
+    "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
 };
