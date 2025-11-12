@@ -56,8 +56,9 @@ async function reconcileOne(mode: Mode, r: Row) {
     orderExists = packages.length > 0;
   }
 
+    // decide() expects "PO" | "SO". Map our SHIP to SO for decision logic.
   const ver = decide({
-    mode,
+    mode: mode === "SHIP" ? "SO" : "PO",
     partyUpload: r.partyName,
     trackingUpload: r.trackingNumber,
     assertedDate: r.assertedDate ?? null,
@@ -65,6 +66,7 @@ async function reconcileOne(mode: Mode, r: Row) {
     packages,
     partyOT,
   });
+
 
   return { mode, verdict: ver.verdict, reason: ver.reason ?? "", dayDelta: ver.dayDelta ?? null };
 }
