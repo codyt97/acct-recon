@@ -1,116 +1,160 @@
+// src/lib/parse.ts
+//
+// Flexible CSV/XLSX parser for PO + ShipDocs + UPS files.
+// - Accepts many header variants (Order/ShipDoc/Invoice number, Tracking, Party, Dates).
+// - Extracts first plausible tracking from "Tracking Details/Status/NO" if needed.
+// - Parses dates from multiple columns (handles "Estimated Delivery Window" ranges).
+// - Returns rows even if only order OR tracking is present (skips empty rows).
+//
+// Dependencies (already in package.json in our repo):
+//   papaparse, xlsx
+//
+// If you see a TS type error for papaparse, add:  npm i -D @types/papaparse
+
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
 
 export type UploadRow = {
-  // what the rest of the app expects
-  orderNumber?: string;
-  partyName?: string; // vendor/customer
-  trackingNumber?: string;
-  assertedDate?: Date | null;
-  // parser debugging
-  _raw?: Record<string, any>;
+  orderNumber?: string;       // PO / ShipDoc / SO / Invoice / generic order id
+  partyName?: string;         // vendor / customer
+  trackingNumber?: string;    // UPS/FedEx/USPS/etc
+  assertedDate?: Date | null; // best-effort date
+  _raw?: Record<string, any>; // original row for debugging
 };
 
 // ----------------------------
-// header & field normalization
+// Config: header synonyms
 // ----------------------------
+
+/** Lower-cased, space-collapsed keys we try to match against */
 const H = {
-  // order numbers
+  // ORDER / DOCUMENT NUMBER (PO, SO, ShipDoc, Invoice, generic)
   ORDER: [
     "po number",
+    "po #",
+    "po no",
+    "po no.",
     "so number",
+    "so #",
+    "so no",
+    "so no.",
     "order number",
     "order #",
     "order no",
-    "orderno",
+    "order no.",
     "order",
-    "po #",
-    "so #",
-    "no.", // OrderTime CSV export uses "No."
-    "vendor invoice/so", // your PO file
-    "associated so", // your SO/UPS exports
+    "no.",               // OrderTime export
+    "no",                // sometimes shows without dot
+    "document number",
+    "document no",
+    "document no.",
+    "vendor invoice/so",
+    "associated so",
     "invoice number",
+    "invoice #",
+    "invoice no",
+    "invoice no.",
+    // ShipDocs variants
+    "ship doc",
+    "ship doc #",
+    "ship doc no",
+    "ship doc no.",
+    "shipdoc",
+    "shipment number",
+    "shipment #",
+    "shipment no",
+    "shipment no.",
   ],
 
-  // tracking
+  // TRACKING
   TRACKING: [
     "tracking",
     "tracking number",
+    "tracking #",
     "tracking no",
     "tracking no.",
-    "tracking details",
-    "tracking status",
     "tracking id",
     "tracking code",
+    "tracking details",
+    "tracking status",
     "shipment tracking",
     "ups tracking",
+    "carrier tracking",
   ],
 
-  // party (vendor/customer)
+  // PARTY (vendor / customer / account)
   PARTY: [
     "vendor",
     "vendor name",
+    "supplier",
+    "supplier name",
     "customer",
     "customer name",
     "party",
     "sold to",
     "bill to",
+    "account name",
   ],
 
-  // dates
+  // DATES
   DATE: [
     "date",
     "transaction date",
     "po promise date",
     "promise date",
     "ship date",
+    "shipment date",
     "invoice date",
-    "estimated delivery window", // range -> take first date
     "asserted date",
+    "estimated delivery window", // range "2025-10-31 – 2025-11-03"
+    "delivery window",
   ],
 } as const;
 
-function norm(s: string | undefined | null): string {
-  return (s || "").toString().trim();
+// ----------------------------
+// Utilities
+// ----------------------------
+
+function norm(v: unknown): string {
+  return (v ?? "").toString().trim();
 }
 
 function keyify(s: string): string {
-  return s.toLowerCase().replace(/\s+/g, " ").trim();
+  return s.toLowerCase().replace(/[\s_]+/g, " ").trim();
 }
 
-function pickHeader(headers: string[], candidates: readonly string[]): string[] {
-  const ks = headers.map(keyify);
+function pickHeaders(headers: string[], candidates: readonly string[]): string[] {
+  const map = new Map(headers.map((h) => [keyify(h), h]));
   const out: string[] = [];
-  ks.forEach((k, idx) => {
-    if (candidates.includes(k)) out.push(headers[idx]);
-  });
+  for (const c of candidates) {
+    const real = map.get(c);
+    if (real) out.push(real);
+  }
   return out;
 }
 
-function parseDateLike(v: any): Date | null {
-  if (!v) return null;
+function parseDateLike(v: unknown): Date | null {
+  if (v == null || v === "") return null;
 
-  // If we got an Excel serial date number
+  // Excel serial numbers
   if (typeof v === "number" && v > 60 && v < 60000) {
     try {
-      return XLSX.SSF.parse_date_code(v)
-        ? new Date(Math.round((v - 25569) * 86400 * 1000))
-        : null;
+      const ms = Math.round((v - 25569) * 86400 * 1000);
+      return new Date(ms);
     } catch {
       /* ignore */
     }
   }
 
   const s = norm(v);
-
   if (!s) return null;
 
-  // Estimated Delivery Window like "2025-10-31 – 2025-11-03"
-  const windowMatch = s.match(
-    /(\d{4}[-/]\d{1,2}[-/]\d{1,2})\s*(?:–|-|to)\s*(\d{4}[-/]\d{1,2}[-/]\d{1,2})/i
+  // Ranges like "2025-10-31 – 2025-11-03" or "10/31/2025 - 11/03/2025"
+  const m = s.match(
+    /(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})\s*(?:–|-|to)\s*(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4})/i
   );
-  if (windowMatch) {
-    const d = Date.parse(windowMatch[1]);
+  if (m) {
+    const d = Date.parse(m[1]);
     return isNaN(d) ? null : new Date(d);
   }
 
@@ -118,50 +162,52 @@ function parseDateLike(v: any): Date | null {
   return isNaN(d) ? null : new Date(d);
 }
 
-function extractFirstTracking(raw: any): string | undefined {
-  // Combine likely tracking fields and scan for first long-ish alphanumeric
+/** Extract the first plausible tracking token from a mixture of fields */
+function extractFirstTracking(raw: Record<string, any>): string | undefined {
   const pool = [
-    norm(raw["Tracking"]),
-    norm(raw["Tracking Number"]),
-    norm(raw["Tracking NO"]),
-    norm(raw["Tracking No"]),
-    norm(raw["Tracking No."]),
-    norm(raw["Tracking Details"]),
-    norm(raw["Tracking Status"]),
-    norm(raw["UPS Tracking"]),
+    "Tracking",
+    "Tracking Number",
+    "Tracking No",
+    "Tracking NO",
+    "Tracking No.",
+    "Tracking #",
+    "Tracking Details",
+    "Tracking Status",
+    "UPS Tracking",
+    "Carrier Tracking",
+    "Shipment Tracking",
   ]
+    .map((k) => norm(raw[k]))
     .filter(Boolean)
     .join(" ");
 
   if (!pool) return undefined;
 
-  // A very loose matcher: alphanumeric strings ≥10 (UPS/FedEx/USPS will pass)
+  // Lenient: alphanumeric 10+ chars
   const m = pool.match(/[A-Z0-9]{10,}/i);
   return m ? m[0].toUpperCase() : undefined;
 }
 
 // ----------------------------
-// CSV/XLSX reading
+// Readers
 // ----------------------------
-async function readAsArrayBuffer(file: File): Promise<ArrayBuffer> {
-  return await file.arrayBuffer();
-}
 
 async function readAsText(file: File): Promise<string> {
   return await file.text();
 }
 
+async function readAsArrayBuffer(file: File): Promise<ArrayBuffer> {
+  return await file.arrayBuffer();
+}
+
 function csvToRows(text: string): Record<string, any>[] {
-  const { data, errors } = Papa.parse<Record<string, any>>(text, {
+  const { data } = Papa.parse<Record<string, any>>(text, {
     header: true,
     dynamicTyping: false,
     skipEmptyLines: true,
   });
-  if (errors && errors.length) {
-    // keep going; we’ll still try to map rows
-    // (you can log errors here if desired)
-  }
-  return (data as any[]).filter((r) => Object.values(r).some((v) => v !== ""));
+  // Papa returns an array with possible empty objects; filter those out.
+  return (data as any[]).filter((r) => r && Object.values(r).some((v) => v !== ""));
 }
 
 function xlsxToRows(buf: ArrayBuffer): Record<string, any>[] {
@@ -171,8 +217,9 @@ function xlsxToRows(buf: ArrayBuffer): Record<string, any>[] {
 }
 
 // ----------------------------
-// Public: parseFile
+// Public API
 // ----------------------------
+
 export async function parseFile(file: File): Promise<UploadRow[]> {
   const name = file.name.toLowerCase();
   const rows: Record<string, any>[] = name.endsWith(".csv")
@@ -181,53 +228,48 @@ export async function parseFile(file: File): Promise<UploadRow[]> {
 
   if (!rows.length) return [];
 
-  // Collect headers
   const headers = Object.keys(rows[0]);
 
-  const orderHeaders = pickHeader(headers, H.ORDER);
-  const trackingHeaders = pickHeader(headers, H.TRACKING);
-  const partyHeaders = pickHeader(headers, H.PARTY);
-  const dateHeaders = pickHeader(headers, H.DATE);
+  const orderHeaders = pickHeaders(headers, H.ORDER);
+  const trackingHeaders = pickHeaders(headers, H.TRACKING);
+  const partyHeaders = pickHeaders(headers, H.PARTY);
+  const dateHeaders = pickHeaders(headers, H.DATE);
 
-  // We won’t fail just because a canonical header is missing; we’ll try to derive.
   const out: UploadRow[] = [];
 
   for (const r of rows) {
     const raw = { ...r };
 
-    // 1) order number
-    let orderNumber =
-      // take first non-empty among mapped order headers
+    // ----- ORDER / DOC NUMBER -----
+    let orderNumber: string | undefined =
       orderHeaders.map((h) => norm(raw[h])).find(Boolean) || undefined;
 
-    // special handling for OrderTime CSV "No."
-    if (!orderNumber && raw["No."]) {
-      orderNumber = norm(raw["No."]);
-    }
+    // explicit common fallbacks
+    if (!orderNumber && raw["No."]) orderNumber = norm(raw["No."]);
+    if (!orderNumber && raw["No"]) orderNumber = norm(raw["No"]);
+    if (!orderNumber && raw["Associated SO"]) orderNumber = norm(raw["Associated SO"]);
+    if (!orderNumber && raw["Vendor Invoice/SO"]) orderNumber = norm(raw["Vendor Invoice/SO"]);
+    if (!orderNumber && raw["Ship Doc No"]) orderNumber = norm(raw["Ship Doc No"]);
+    if (!orderNumber && raw["Ship Doc No."]) orderNumber = norm(raw["Ship Doc No."]);
+    if (!orderNumber && raw["ShipDoc"]) orderNumber = norm(raw["ShipDoc"]);
+    if (!orderNumber && raw["Shipment Number"]) orderNumber = norm(raw["Shipment Number"]);
+    if (!orderNumber && raw["Shipment No"]) orderNumber = norm(raw["Shipment No"]);
+    if (!orderNumber && raw["Shipment No."]) orderNumber = norm(raw["Shipment No."]);
 
-    // sometimes PO files store SO/Invoice number in these fields
-    if (!orderNumber && raw["Associated SO"]) {
-      orderNumber = norm(raw["Associated SO"]);
-    }
-    if (!orderNumber && raw["Vendor Invoice/SO"]) {
-      orderNumber = norm(raw["Vendor Invoice/SO"]);
-    }
+    if (orderNumber) orderNumber = orderNumber.replace(/\s+/g, " ").trim();
 
-    // 2) tracking
-    let trackingNumber =
+    // ----- TRACKING -----
+    let trackingNumber: string | undefined =
       trackingHeaders.map((h) => norm(raw[h])).find(Boolean) || undefined;
 
-    if (!trackingNumber) {
-      trackingNumber = extractFirstTracking(raw);
-    }
-
+    if (!trackingNumber) trackingNumber = extractFirstTracking(raw);
     if (trackingNumber) trackingNumber = trackingNumber.toUpperCase();
 
-    // 3) party
-    let partyName =
+    // ----- PARTY -----
+    let partyName: string | undefined =
       partyHeaders.map((h) => norm(raw[h])).find(Boolean) || undefined;
 
-    // 4) date
+    // ----- DATE -----
     let assertedDate: Date | null = null;
     for (const h of dateHeaders) {
       const d = parseDateLike(raw[h]);
@@ -236,26 +278,23 @@ export async function parseFile(file: File): Promise<UploadRow[]> {
         break;
       }
     }
-
-    // If we still have nothing for date, try common raw names explicitly
     if (!assertedDate) {
+      // extra explicit fallbacks
       assertedDate =
         parseDateLike(raw["PO Promise date"]) ||
         parseDateLike(raw["Promise Date"]) ||
+        parseDateLike(raw["Ship Date"]) ||
+        parseDateLike(raw["Shipment Date"]) ||
         parseDateLike(raw["Date"]) ||
         parseDateLike(raw["Estimated Delivery Window"]) ||
         null;
     }
 
-    // Safety: if we truly have neither order nor tracking, then this row
-    // is not actionable and we skip it (or you can choose to push an empty row).
+    // Skip rows with no actionable identifiers
     if (!orderNumber && !trackingNumber) {
-      // skip totally empty business rows
       const hasAnyValue = Object.values(raw).some((v) => norm(v));
       if (!hasAnyValue) continue;
-
-      // If you’d rather hard-fail, throw here; but tolerating is nicer UX.
-      // throw new Error("Row missing both orderNumber and trackingNumber.");
+      // tolerate: do not throw, just skip
       continue;
     }
 
@@ -269,10 +308,10 @@ export async function parseFile(file: File): Promise<UploadRow[]> {
   }
 
   if (!out.length) {
-    // True hard fail only if no actionable rows were produced
-    const foundHeaders = headers.join(" | ");
+    // Only hard-fail if nothing usable was produced
+    const found = headers.join(" | ");
     throw new Error(
-      `Missing required column(s): orderNumber or trackingNumber. Found headers: ${foundHeaders}`
+      `Missing required column(s): orderNumber or trackingNumber. Found headers: ${found}`
     );
   }
 
