@@ -1,48 +1,39 @@
 // src/app/api/reconcile/route.ts
-// Next.js App Router API endpoint for Accounting Reconciliation
-// - Accepts multipart/form-data with fields: poFile, shipFile, upsFile
-// - Parses CSV/XLSX using 'xlsx' (ensure it's in dependencies)
-// - Normalizes headers and reconciles by tracking number
-// - ONE ROW PER TRACKING, with PO precedence over ShipDocs over UPS
-// - If a PO exists for a tracking, show PO# and PO date (fallback to ShipDocs/UPS date)
-
 import * as XLSX from "xlsx";
 
-export const runtime = "nodejs"; // we need Node APIs for xlsx
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-// ----------------------------- Types ---------------------------------
 
 type SourceMode = "PO" | "ShipDocs" | "UPS";
 type SourceModeFile = "PO-file" | "ShipDocs-file" | "UPS-file";
 
 type UploadRow = {
-  row: number; // original row number (1-based in the uploaded file)
+  row: number;
   tracking?: string | null;
   poNumber?: string | null;
   shipDocNumber?: string | null;
   vendor?: string | null;
   customer?: string | null;
-  date?: string | null; // normalized yyyy-mm-dd when possible, else original string
+  date?: string | null;
   sourceMode: SourceMode;
 };
 
 type DetailRow = {
   row: string | number;
-  sourceMode: SourceModeFile; // which file "won" for this tracking
+  sourceMode: SourceModeFile;
   chosenMode: SourceMode;
-  orderNumber: string; // PO number OR ShipDoc number, or "" for pure UPS
-  partyUpload?: string | null; // vendor/customer display
-  trackingUpload: string; // normalized tracking (no spaces/dashes)
-  assertedDate: string | null; // the chosen display date
-  verdict: string; // e.g., MATCH_PO, MATCH_SHIPDOCS, UNMATCHED_UPS
-  reason: string; // brief explanation
-  dayDelta?: number | null; // optional if you choose to compute
-  poVerdict?: string | null; // simple result channel for your UI
+  orderNumber: string;
+  partyUpload?: string | null;
+  trackingUpload: string;
+  assertedDate: string | null;
+  verdict: string;
+  reason: string;
+  dayDelta?: number | null;
+  poVerdict?: string | null;
   shipVerdict?: string | null;
 };
 
-// --------------------------- Utils -----------------------------------
+// --------------------------- utils ---------------------------
 
 function normTracking(s: string | null | undefined) {
   if (!s) return "";
@@ -52,8 +43,10 @@ function normTracking(s: string | null | undefined) {
 function isDateLike(v: any): boolean {
   if (v instanceof Date && !isNaN(v.getTime())) return true;
   if (typeof v === "string") {
-    // very loose check: contains digits and separators
-    return /\d{1,4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,4}/.test(v) || /^\d{4}-\d{2}-\d{2}/.test(v);
+    return (
+      /\d{1,4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,4}/.test(v) ||
+      /^\d{4}-\d{2}-\d{2}/.test(v)
+    );
   }
   return false;
 }
@@ -67,7 +60,6 @@ function toISODateOrNull(v: any): string | null {
     return `${y}-${m}-${d}`;
   }
   if (typeof v === "number") {
-    // Excel serial number dates
     const date = XLSX.SSF.parse_date_code(v);
     if (date) {
       const y = date.y;
@@ -77,7 +69,6 @@ function toISODateOrNull(v: any): string | null {
     }
   }
   if (typeof v === "string") {
-    // Try native Date parse as last resort
     const parsed = new Date(v);
     if (!isNaN(parsed.getTime())) {
       const y = parsed.getFullYear();
@@ -90,6 +81,7 @@ function toISODateOrNull(v: any): string | null {
 }
 
 function sheetToJson(buf: Buffer): any[] {
+  // XLSX auto-detects CSV vs XLSX from the buffer
   const wb = XLSX.read(buf, { type: "buffer" });
   const sheetName = wb.SheetNames[0];
   const ws = wb.Sheets[sheetName];
@@ -105,21 +97,34 @@ function lcKeyed(obj: Record<string, any>): Record<string, any> {
   return out;
 }
 
-// Header alias buckets (expand as needed)
-const trackingAliases = [
-  "tracking", "tracking#", "tracking number", "trackingnumber", "ups tracking", "ups", "trk", "awb",
-];
-const poAliases = [
-  "po", "po#", "po number", "ponumber", "purchase order", "purchase order number",
-];
-const shipDocAliases = [
-  "shipdoc", "ship doc", "ship doc#", "shipment doc", "so", "so#", "sales order", "sales order number",
-];
-const vendorAliases = ["vendor", "supplier", "from", "vendor name"];
-const customerAliases = ["customer", "bill to", "sold to", "ship to", "client"];
-const dateAliases = ["date", "transaction date", "post date", "posted date", "shipment date", "ship date", "invoice date"];
+// ---------------------- robust field detection ----------------------
 
-// Extract first non-empty match from aliases
+// Expanded aliases (add more if your exports use other labels)
+const trackingAliases = [
+  "tracking","tracking#","tracking number","trackingnumber","ups tracking","ups",
+  "trk","awb","carrier tracking","carrier tracking number","package tracking number",
+  "shipment tracking","shipment tracking number","tracking no.","tracking id",
+];
+
+const poAliases = [
+  "po","po#","po number","ponumber","purchase order","purchase order number",
+  "purchase order #","purchaseorder","purchase order id","po id",
+];
+
+const shipDocAliases = [
+  "shipdoc","ship doc","ship doc#","shipment doc","shipdoc number",
+  "ship doc number","shipdoc#","ship document","shipment document",
+  "so","so#","sales order","sales order number","sales order #","salesorder",
+  "document number","doc number","doc#", "document#", "shipdoc id", "ship doc id",
+];
+
+const vendorAliases = ["vendor","supplier","from","vendor name"];
+const customerAliases = ["customer","bill to","sold to","ship to","client","customer name"];
+const dateAliases = [
+  "date","transaction date","post date","posted date","shipment date","ship date","invoice date"
+];
+
+// pick first header match
 function pickFirst(obj: Record<string, any>, keys: string[]): any {
   for (const k of keys) {
     if (obj[k] != null && obj[k] !== "") return obj[k];
@@ -127,7 +132,36 @@ function pickFirst(obj: Record<string, any>, keys: string[]): any {
   return null;
 }
 
-// ---------------------- Core Reconcile (PO-preferred) -----------------
+// UPS pattern finder: scans a value for any 1Z tracking (with or without spaces/dashes)
+function findUpsInString(s: string): string | null {
+  if (!s) return null;
+  // quick direct match
+  const direct = s.match(/1Z[0-9A-Z]{16,}/i);
+  if (direct) return normTracking(direct[0]);
+
+  // remove non-alnum and try again to catch spaced/hyphenated forms
+  const squeezed = s.replace(/[^0-9A-Za-z]/g, "");
+  if (/^1Z[0-9A-Z]{16,}$/i.test(squeezed)) return squeezed.toUpperCase();
+
+  // scan for embedded after squeeze (rare)
+  const embedded = squeezed.match(/1Z[0-9A-Z]{16,}/i);
+  if (embedded) return embedded[0].toUpperCase();
+
+  return null;
+}
+
+// fallbacks: scan every cell in the row if header-based tracking wasn't found
+function fallbackTrackingFromAnyCell(rawLower: Record<string, any>): string | null {
+  for (const v of Object.values(rawLower)) {
+    if (v == null) continue;
+    const s = String(v);
+    const hit = findUpsInString(s);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+// ---------------------- reconcile core (PO preferred) ----------------------
 
 function reconcileByTrackingPreferPO(
   poRows: UploadRow[],
@@ -156,15 +190,8 @@ function reconcileByTrackingPreferPO(
   const out: DetailRow[] = [];
 
   for (const [k, bucket] of byTracking.entries()) {
-    // Prefer PO if present
     if (bucket.po && bucket.po.length > 0) {
-      // Tie-breaker: choose the earliest PO date, otherwise first
-      const pick = [...bucket.po].sort((a, b) => {
-        const da = a.date || "";
-        const db = b.date || "";
-        return da.localeCompare(db);
-      })[0];
-
+      const pick = [...bucket.po].sort((a, b) => (a.date || "").localeCompare(b.date || ""))[0];
       const fallbackDate =
         bucket.ups?.find(u => !!u.date)?.date ||
         bucket.ship?.find(s => !!s.date)?.date ||
@@ -187,16 +214,9 @@ function reconcileByTrackingPreferPO(
       continue;
     }
 
-    // Else, prefer ShipDocs
     if (bucket.ship && bucket.ship.length > 0) {
-      const pick = [...bucket.ship].sort((a, b) => {
-        const da = a.date || "";
-        const db = b.date || "";
-        return da.localeCompare(db);
-      })[0];
-
-      const fallbackDate =
-        bucket.ups?.find(u => !!u.date)?.date || null;
+      const pick = [...bucket.ship].sort((a, b) => (a.date || "").localeCompare(b.date || ""))[0];
+      const fallbackDate = bucket.ups?.find(u => !!u.date)?.date || null;
 
       out.push({
         row: `trk:${k}`,
@@ -215,13 +235,8 @@ function reconcileByTrackingPreferPO(
       continue;
     }
 
-    // Else, UPS-only row (unmatched)
     if (bucket.ups && bucket.ups.length > 0) {
-      const u = [...bucket.ups].sort((a, b) => {
-        const da = a.date || "";
-        const db = b.date || "";
-        return da.localeCompare(db);
-      })[0];
+      const u = [...bucket.ups].sort((a, b) => (a.date || "").localeCompare(b.date || ""))[0];
 
       out.push({
         row: `trk:${k}`,
@@ -243,7 +258,7 @@ function reconcileByTrackingPreferPO(
   return out;
 }
 
-// ----------------------- Parsing & Mapping ----------------------------
+// ---------------------- parsing: CSV/XLSX + robust tracking  ----------------------
 
 async function parseUploadToRows(
   file: File,
@@ -252,28 +267,32 @@ async function parseUploadToRows(
   const ab = await file.arrayBuffer();
   const buf = Buffer.from(ab);
 
-  const rows = sheetToJson(buf); // [{header:value, ...}, ...]
+  const rows = sheetToJson(buf);
   const out: UploadRow[] = [];
 
   for (let i = 0; i < rows.length; i++) {
-    const raw = lcKeyed(rows[i] || {});
+    const rawLower = lcKeyed(rows[i] || {});
 
-    const trackingRaw = pickFirst(raw, trackingAliases);
-    const poRaw = pickFirst(raw, poAliases);
-    const shipDocRaw = pickFirst(raw, shipDocAliases);
-    const vendorRaw = pickFirst(raw, vendorAliases);
-    const customerRaw = pickFirst(raw, customerAliases);
-    const dateRaw = pickFirst(raw, dateAliases);
+    // primary extraction via headers
+    let trackingRaw = pickFirst(rawLower, trackingAliases);
+    let tracking = trackingRaw != null ? String(trackingRaw).trim() : null;
 
-    const tracking = trackingRaw != null ? String(trackingRaw).trim() : null;
+    // fallback: scan every cell for any UPS 1Z
+    if (!tracking) {
+      tracking = fallbackTrackingFromAnyCell(rawLower);
+    }
+    if (tracking) tracking = normTracking(tracking);
 
-    // Normalize date to yyyy-mm-dd when feasible
+    const poRaw = pickFirst(rawLower, poAliases);
+    const shipDocRaw = pickFirst(rawLower, shipDocAliases);
+    const vendorRaw = pickFirst(rawLower, vendorAliases);
+    const customerRaw = pickFirst(rawLower, customerAliases);
+    const dateRaw = pickFirst(rawLower, dateAliases);
+
     let date: string | null = null;
     if (dateRaw != null && dateRaw !== "") {
-      // xlsx may have converted date cells to JS Date already; still normalize
       date = toISODateOrNull(dateRaw);
       if (!date && isDateLike(dateRaw)) {
-        // very last fallback, try new Date on string
         const parsed = new Date(dateRaw as any);
         if (!isNaN(parsed.getTime())) {
           const y = parsed.getFullYear();
@@ -291,7 +310,7 @@ async function parseUploadToRows(
       shipDocNumber: shipDocRaw != null ? String(shipDocRaw).trim() : null,
       vendor: vendorRaw != null ? String(vendorRaw).trim() : null,
       customer: customerRaw != null ? String(customerRaw).trim() : null,
-      date: date,
+      date,
       sourceMode,
     });
   }
@@ -299,14 +318,11 @@ async function parseUploadToRows(
   return out;
 }
 
-// --------------------------- Summary ---------------------------------
+// --------------------------- summary ---------------------------
 
 function buildSummary(details: DetailRow[]) {
   const total = details.length;
-
-  let matchPO = 0;
-  let matchShip = 0;
-  let unmatchedUPS = 0;
+  let matchPO = 0, matchShip = 0, unmatchedUPS = 0;
 
   for (const d of details) {
     if (d.verdict === "MATCH_PO") matchPO++;
@@ -324,7 +340,7 @@ function buildSummary(details: DetailRow[]) {
   };
 }
 
-// ----------------------------- Handler --------------------------------
+// --------------------------- handler ---------------------------
 
 export async function POST(req: Request) {
   try {
@@ -335,30 +351,21 @@ export async function POST(req: Request) {
     const upsFile = form.get("upsFile");
 
     if (!(poFile instanceof File) && !(shipFile instanceof File) && !(upsFile instanceof File)) {
-      return new Response("Please upload at least one file (PO and/or ShipDocs and/or UPS).", {
-        status: 400,
-      });
+      return new Response("Please upload at least one file (PO and/or ShipDocs and/or UPS).", { status: 400 });
     }
 
-    // Parse each present file into UploadRow[]
     const [poRows, shipRows, upsRows] = await Promise.all([
       poFile instanceof File ? parseUploadToRows(poFile, "PO") : Promise.resolve<UploadRow[]>([]),
       shipFile instanceof File ? parseUploadToRows(shipFile, "ShipDocs") : Promise.resolve<UploadRow[]>([]),
       upsFile instanceof File ? parseUploadToRows(upsFile, "UPS") : Promise.resolve<UploadRow[]>([]),
     ]);
 
-    // Reconcile with PO precedence and "one row per tracking"
     const details = reconcileByTrackingPreferPO(poRows, shipRows, upsRows);
-
-    // Simple summary
     const summary = buildSummary(details);
 
     return Response.json({ summary, details }, { status: 200 });
   } catch (err: any) {
     console.error("Reconcile error:", err);
-    return new Response(
-      typeof err?.message === "string" ? err.message : "Internal Server Error",
-      { status: 500 }
-    );
-    }
+    return new Response(typeof err?.message === "string" ? err.message : "Internal Server Error", { status: 500 });
+  }
 }
