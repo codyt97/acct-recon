@@ -1,11 +1,27 @@
+// src/app/page.tsx 
 "use client";
 import { useState } from "react";
+
+type DetailRow = {
+  row: number | string;
+  sourceMode: "PO-file" | "ShipDocs-file" | "UPS-file";
+  chosenMode: "PO" | "ShipDocs" | "UPS";
+  orderNumber: string;
+  partyUpload?: string | null;
+  trackingUpload: string;
+  assertedDate: string | null;
+  verdict: "MATCH_PO" | "MATCH_SHIPDOCS" | "UNMATCHED_UPS" | string;
+  reason: string;
+  dayDelta?: number | null;
+  poVerdict?: string | null;
+  shipVerdict?: string | null;
+};
 
 export default function Home() {
   const [poFile, setPoFile] = useState<File | null>(null);
   const [shipFile, setShipFile] = useState<File | null>(null); // ShipDocs
   const [upsFile, setUpsFile] = useState<File | null>(null);
-  const [result, setResult] = useState<any | null>(null);
+  const [result, setResult] = useState<{ summary: any; details: DetailRow[] } | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -20,7 +36,7 @@ export default function Home() {
 
     const fd = new FormData();
     if (poFile) fd.append("poFile", poFile);
-    if (shipFile) fd.append("shipFile", shipFile); // renamed
+    if (shipFile) fd.append("shipFile", shipFile);
     if (upsFile) fd.append("upsFile", upsFile);
 
     const r = await fetch("/api/reconcile", { method: "POST", body: fd });
@@ -99,6 +115,13 @@ export default function Home() {
             {JSON.stringify(result.summary, null, 2)}
           </pre>
 
+          {/* Legend */}
+          <div style={{ display: "flex", gap: 16, alignItems: "center", marginTop: 10 }}>
+            <LegendSwatch color="#d7f5d0" label="Match PO (Light Green)" />
+            <LegendSwatch color="#0b7f2d" label="Match ShipDoc (Dark Green)" dark />
+            <LegendSwatch color="#ffd6d6" label="Unmatched (Red)" />
+          </div>
+
           <h2 style={{ fontSize: 18, fontWeight: 600, marginTop: 16 }}>Details</h2>
 
           <div style={{ width: "100%", overflowX: "auto" }}>
@@ -114,7 +137,7 @@ export default function Home() {
                 <tr>
                   {[
                     "Row",
-                    "Source", // PO-file / ShipDocs-file / UPS-file
+                    "Source",
                     "Chosen",
                     "Order",
                     "Party",
@@ -145,29 +168,74 @@ export default function Home() {
                 </tr>
               </thead>
               <tbody>
-                {result.details.map((r: any) => (
-                  <tr key={`${r.row}-${r.sourceMode}-${r.orderNumber}-${r.trackingUpload}`}>
-                    <td style={cell}>{r.row}</td>
-                    <td style={cell}>{r.sourceMode}</td>
-                    <td style={cell}>{r.chosenMode}</td>
-                    <td style={cell}>{r.orderNumber}</td>
-                    <td style={cell}>{r.partyUpload}</td>
-                    <td style={cellMono}>{r.trackingUpload}</td>
-                    <td style={cell}>{r.assertedDate}</td>
-                    <td style={{ ...cell, fontWeight: 600 }}>{r.verdict}</td>
-                    <td style={{ ...cell, maxWidth: 520, whiteSpace: "normal", wordBreak: "break-word" }}>
-                      {r.reason}
-                    </td>
-                    <td style={{ ...cell, textAlign: "right", width: 60 }}>{r.dayDelta ?? ""}</td>
-                    <td style={cell}>{r.poVerdict ?? ""}</td>
-                    <td style={cell}>{r.shipVerdict ?? ""}</td>
-                  </tr>
-                ))}
+                {result.details.map((r) => {
+                  const { bg, fg } = colorForVerdict(r.verdict);
+                  return (
+                    <tr
+                      key={`${r.row}-${r.sourceMode}-${r.orderNumber}-${r.trackingUpload}`}
+                      style={{ background: bg, color: fg }}
+                    >
+                      <td style={cell}>{r.row}</td>
+                      <td style={cell}>{r.sourceMode}</td>
+                      <td style={cell}>{r.chosenMode}</td>
+                      <td style={cell}>{r.orderNumber}</td>
+                      <td style={cell}>{r.partyUpload || ""}</td>
+                      <td style={cellMono}>{r.trackingUpload}</td>
+                      <td style={cell}>{r.assertedDate || ""}</td>
+                      <td style={{ ...cell, fontWeight: 700 }}>{r.verdict}</td>
+                      <td
+                        style={{
+                          ...cell,
+                          maxWidth: 520,
+                          whiteSpace: "normal",
+                          wordBreak: "break-word",
+                        }}
+                      >
+                        {r.reason}
+                      </td>
+                      <td style={{ ...cell, textAlign: "right", width: 60 }}>
+                        {r.dayDelta ?? ""}
+                      </td>
+                      <td style={cell}>{r.poVerdict ?? ""}</td>
+                      <td style={cell}>{r.shipVerdict ?? ""}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function colorForVerdict(verdict: DetailRow["verdict"]): { bg: string; fg: string } {
+  switch (verdict) {
+    case "MATCH_PO":
+      return { bg: "#d7f5d0", fg: "#102a12" }; // light green
+    case "MATCH_SHIPDOCS":
+      return { bg: "#0b7f2d", fg: "#ffffff" }; // dark green
+    case "UNMATCHED_UPS":
+    default:
+      return { bg: "#ffd6d6", fg: "#5a0000" }; // light red
+  }
+}
+
+function LegendSwatch({ color, label, dark }: { color: string; label: string; dark?: boolean }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <span
+        style={{
+          display: "inline-block",
+          width: 16,
+          height: 16,
+          borderRadius: 4,
+          background: color,
+          border: "1px solid rgba(0,0,0,0.15)",
+        }}
+      />
+      <span style={{ fontSize: 12, color: dark ? "#222222" : "#333333" }}>{label}</span>
     </div>
   );
 }
@@ -192,7 +260,11 @@ function Uploader({
     >
       <div style={{ fontWeight: 600, marginBottom: 6 }}>{label}</div>
       <input type="file" onChange={(e) => onChange(e.target.files?.[0] ?? null)} />
-      {file && <div style={{ fontSize: 12, color: "#555", marginTop: 6 }}>{file.name}</div>}
+      {file && (
+        <div style={{ fontSize: 12, color: "#555", marginTop: 6 }}>
+          {file.name}
+        </div>
+      )}
     </div>
   );
 }
